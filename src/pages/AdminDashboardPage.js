@@ -36,10 +36,76 @@ function formatDayLabel(ms) {
   }
 }
 
+function formatInputDate(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function dayStartFromInputDate(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 0;
+  const [y, m, d] = raw.split('-').map((v) => Number(v));
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return 0;
+  return new Date(y, m - 1, d).getTime();
+}
+
+function formatLongDayLabel(ms) {
+  if (!ms) return '—';
+  try {
+    return new Date(ms).toLocaleDateString(undefined, {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  } catch {
+    return '—';
+  }
+}
+
 function formatPhp(amount) {
   const n = Number(amount || 0);
   if (!Number.isFinite(n)) return 'PHP 0.00';
   return `PHP ${n.toFixed(2)}`;
+}
+
+function formatDateCompact(ts) {
+  const ms = toMillis(ts);
+  if (!ms) return '—';
+  try {
+    return new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' });
+  } catch {
+    return '—';
+  }
+}
+
+function inferredStartEndForPayment(payment) {
+  const planKey = normalizePlanKeyFromPayment(payment);
+  const startRaw = payment?.startDate || payment?.paidAt || payment?.submittedAt || payment?.createdAt || payment?.updatedAt || null;
+  const startMs = startRaw ? toMillis(startRaw) || Date.parse(String(startRaw)) : 0;
+  const endRaw = payment?.endDate || null;
+  const endMsExplicit = endRaw ? Date.parse(String(endRaw)) : 0;
+
+  if (endMsExplicit) {
+    return { start: formatDateCompact(startMs), end: formatDateCompact(endMsExplicit) };
+  }
+
+  if (!startMs) return { start: '—', end: '—' };
+
+  if (planKey === 'daily' || planKey === 'walkin' || planKey === 'elite') {
+    return { start: formatDateCompact(startMs), end: formatDateCompact(startMs + 24 * 60 * 60 * 1000) };
+  }
+
+  // monthly (or base) fallback: 30-day window if endDate not saved
+  if (planKey === 'monthly' || planKey === 'base') {
+    return { start: formatDateCompact(startMs), end: formatDateCompact(startMs + 30 * 24 * 60 * 60 * 1000) };
+  }
+
+  return { start: formatDateCompact(startMs), end: '—' };
 }
 
 function DailyRevenueChart({ series, maxTotal, days }) {
@@ -96,6 +162,12 @@ function DailyRevenueChart({ series, maxTotal, days }) {
   }, [series, maxTotal, dims]);
 
   const active = hoverIdx != null ? chart.pts[hoverIdx] : null;
+  const tooltipLeftPct = useMemo(() => {
+    if (!active) return 50;
+    const raw = (active.x / dims.w) * 100;
+    // Keep tooltip inside the card on small screens / edges.
+    return Math.max(8, Math.min(92, raw));
+  }, [active, dims.w]);
 
   function onMove(e) {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -110,7 +182,7 @@ function DailyRevenueChart({ series, maxTotal, days }) {
   }
 
   return (
-    <div style={{ position: 'relative' }}>
+    <div style={{ position: 'relative', paddingRight: '0.35rem' }}>
       <style>{`
         @keyframes clutchDrawLine {
           from { stroke-dashoffset: var(--dash, 1200); opacity: 0.35; }
@@ -250,7 +322,7 @@ function DailyRevenueChart({ series, maxTotal, days }) {
         <div
           style={{
             position: 'absolute',
-            left: `${(active.x / dims.w) * 100}%`,
+            left: `${tooltipLeftPct}%`,
             top: `${Math.max(8, (active.y / dims.h) * 100 - 6)}%`,
             transform: 'translate(-50%, -110%)',
             pointerEvents: 'none',
@@ -400,13 +472,17 @@ function coalesceSessionDefaults(sd) {
   };
 }
 
+const PRICING_SYNC_CHANNEL = 'clutch-pricing-sync';
+
 export default function AdminDashboardPage() {
   const { user, logout } = useAuth();
   const [activeView, setActiveView] = useState('members'); // members | billing | reports | customization
   const [memberSearch, setMemberSearch] = useState('');
   const [memberTypeFilter, setMemberTypeFilter] = useState('all'); // all | monthly | daily
   const [memberCategoryFilter, setMemberCategoryFilter] = useState('all'); // all | member | non-member
-  const [reportDays, setReportDays] = useState(14);
+  const [reportDays] = useState(14);
+  const [reportSelectedDate, setReportSelectedDate] = useState(() => formatInputDate(Date.now()));
+  const [billingSelectedMonth, setBillingSelectedMonth] = useState(() => formatInputDate(Date.now()).slice(0, 7)); // YYYY-MM
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [users, setUsers] = useState([]);
@@ -436,8 +512,8 @@ export default function AdminDashboardPage() {
   const DEFAULT_STANDARD_PRICES = useMemo(() => ({ base: 49, pro: 79, elite: 119 }), []);
   const DEFAULT_TIER_PRICES = useMemo(
     () => ({
-      member: { monthly: 49, daily: 119, walkin: 80 },
-      nonMember: { monthly: 49, daily: 119, walkin: 80 },
+      member: { monthly: 49, membership: 49, daily: 119, walkin: 80 },
+      nonMember: { monthly: 49, membership: 49, daily: 119, walkin: 80 },
     }),
     []
   );
@@ -506,11 +582,17 @@ export default function AdminDashboardPage() {
           tiers: {
             member: {
               monthly: Number.isFinite(Number(memberTier.monthly)) ? Number(memberTier.monthly) : (typeof standard.base === 'number' ? standard.base : DEFAULT_TIER_PRICES.member.monthly),
+              membership: Number.isFinite(Number(memberTier.membership))
+                ? Number(memberTier.membership)
+                : (Number.isFinite(Number(memberTier.monthly)) ? Number(memberTier.monthly) : (typeof standard.base === 'number' ? standard.base : DEFAULT_TIER_PRICES.member.membership)),
               daily: Number.isFinite(Number(memberTier.daily)) ? Number(memberTier.daily) : (typeof standard.elite === 'number' ? standard.elite : DEFAULT_TIER_PRICES.member.daily),
               walkin: Number.isFinite(Number(memberTier.walkin)) ? Number(memberTier.walkin) : (typeof walkIn.price === 'number' ? walkIn.price : DEFAULT_TIER_PRICES.member.walkin),
             },
             nonMember: {
               monthly: Number.isFinite(Number(nonMemberTier.monthly)) ? Number(nonMemberTier.monthly) : (typeof standard.base === 'number' ? standard.base : DEFAULT_TIER_PRICES.nonMember.monthly),
+              membership: Number.isFinite(Number(nonMemberTier.membership))
+                ? Number(nonMemberTier.membership)
+                : (Number.isFinite(Number(nonMemberTier.monthly)) ? Number(nonMemberTier.monthly) : (typeof standard.base === 'number' ? standard.base : DEFAULT_TIER_PRICES.nonMember.membership)),
               daily: Number.isFinite(Number(nonMemberTier.daily)) ? Number(nonMemberTier.daily) : (typeof standard.elite === 'number' ? standard.elite : DEFAULT_TIER_PRICES.nonMember.daily),
               walkin: Number.isFinite(Number(nonMemberTier.walkin)) ? Number(nonMemberTier.walkin) : (typeof walkIn.price === 'number' ? walkIn.price : DEFAULT_TIER_PRICES.nonMember.walkin),
             },
@@ -561,11 +643,17 @@ export default function AdminDashboardPage() {
         tiers: {
           member: {
             monthly: Number.isFinite(Number(memberTier.monthly)) ? Number(memberTier.monthly) : (typeof standard.base === 'number' ? standard.base : DEFAULT_TIER_PRICES.member.monthly),
+            membership: Number.isFinite(Number(memberTier.membership))
+              ? Number(memberTier.membership)
+              : (Number.isFinite(Number(memberTier.monthly)) ? Number(memberTier.monthly) : (typeof standard.base === 'number' ? standard.base : DEFAULT_TIER_PRICES.member.membership)),
             daily: Number.isFinite(Number(memberTier.daily)) ? Number(memberTier.daily) : (typeof standard.elite === 'number' ? standard.elite : DEFAULT_TIER_PRICES.member.daily),
             walkin: Number.isFinite(Number(memberTier.walkin)) ? Number(memberTier.walkin) : (typeof walkIn.price === 'number' ? walkIn.price : DEFAULT_TIER_PRICES.member.walkin),
           },
           nonMember: {
             monthly: Number.isFinite(Number(nonMemberTier.monthly)) ? Number(nonMemberTier.monthly) : (typeof standard.base === 'number' ? standard.base : DEFAULT_TIER_PRICES.nonMember.monthly),
+            membership: Number.isFinite(Number(nonMemberTier.membership))
+              ? Number(nonMemberTier.membership)
+              : (Number.isFinite(Number(nonMemberTier.monthly)) ? Number(nonMemberTier.monthly) : (typeof standard.base === 'number' ? standard.base : DEFAULT_TIER_PRICES.nonMember.membership)),
             daily: Number.isFinite(Number(nonMemberTier.daily)) ? Number(nonMemberTier.daily) : (typeof standard.elite === 'number' ? standard.elite : DEFAULT_TIER_PRICES.nonMember.daily),
             walkin: Number.isFinite(Number(nonMemberTier.walkin)) ? Number(nonMemberTier.walkin) : (typeof walkIn.price === 'number' ? walkIn.price : DEFAULT_TIER_PRICES.nonMember.walkin),
           },
@@ -592,8 +680,10 @@ export default function AdminDashboardPage() {
     setPricingSuccess('');
     try {
       const memberMonthly = Number(pricing?.tiers?.member?.monthly);
+      const memberMembership = Number(pricing?.tiers?.member?.membership);
       const memberDaily = Number(pricing?.tiers?.member?.daily);
       const nonMemberMonthly = Number(pricing?.tiers?.nonMember?.monthly);
+      const nonMemberMembership = Number(pricing?.tiers?.nonMember?.membership);
       const nonMemberDaily = Number(pricing?.tiers?.nonMember?.daily);
       const sm = pricing?.sessionDefaults?.member || {};
       const sn = pricing?.sessionDefaults?.nonMember || {};
@@ -608,7 +698,7 @@ export default function AdminDashboardPage() {
         },
       };
 
-      const allPrices = [memberMonthly, memberDaily, nonMemberMonthly, nonMemberDaily];
+      const allPrices = [memberMonthly, memberMembership, memberDaily, nonMemberMonthly, nonMemberMembership, nonMemberDaily];
       if (allPrices.some((v) => !Number.isFinite(v) || v <= 0)) {
         throw new Error('All Member and Non-member prices must be valid numbers.');
       }
@@ -622,10 +712,12 @@ export default function AdminDashboardPage() {
         tiers: {
           member: {
             monthly: memberMonthly,
+            membership: memberMembership,
             daily: memberDaily,
           },
           nonMember: {
             monthly: nonMemberMonthly,
+            membership: nonMemberMembership,
             daily: nonMemberDaily,
           },
         },
@@ -655,10 +747,16 @@ export default function AdminDashboardPage() {
           tiers: {
             member: {
               monthly: Number.isFinite(Number(memberTier.monthly)) ? Number(memberTier.monthly) : memberMonthly,
+              membership: Number.isFinite(Number(memberTier.membership))
+                ? Number(memberTier.membership)
+                : memberMembership,
               daily: Number.isFinite(Number(memberTier.daily)) ? Number(memberTier.daily) : memberDaily,
             },
             nonMember: {
               monthly: Number.isFinite(Number(nonMemberTier.monthly)) ? Number(nonMemberTier.monthly) : nonMemberMonthly,
+              membership: Number.isFinite(Number(nonMemberTier.membership))
+                ? Number(nonMemberTier.membership)
+                : nonMemberMembership,
               daily: Number.isFinite(Number(nonMemberTier.daily)) ? Number(nonMemberTier.daily) : nonMemberDaily,
             },
           },
@@ -670,6 +768,13 @@ export default function AdminDashboardPage() {
             endAtMs: normalizeMs(walkIn.endAtMs),
           },
         });
+      }
+      const pricingUpdatedAt = String(Date.now());
+      localStorage.setItem('clutch_pricing_updated_at', pricingUpdatedAt);
+      if (typeof BroadcastChannel !== 'undefined') {
+        const channel = new BroadcastChannel(PRICING_SYNC_CHANNEL);
+        channel.postMessage({ type: 'pricing-updated', at: pricingUpdatedAt });
+        channel.close();
       }
       setPricingSuccess('Saved successfully.');
     } catch (e) {
@@ -840,7 +945,9 @@ export default function AdminDashboardPage() {
   const rows = useMemo(() => {
     const now = Date.now();
 
-    return users.map((u) => {
+    return users
+      .filter((u) => String(u?.role || '').trim().toLowerCase() !== 'admin')
+      .map((u) => {
       const userPayments = paymentsByUserId.get(u.id) || [];
       const latest = pickLatestPayment(userPayments);
 
@@ -862,8 +969,8 @@ export default function AdminDashboardPage() {
 
       const planKey = normalizePlanKeyFromPayment(latest);
       const plan = planLabel(planKey);
-      const rawCategory = String(latest?.memberCategory || '').trim().toLowerCase();
-      const memberType = rawCategory.includes('non-member') ? 'Non-member' : 'Member';
+      const rawCategory = String(latest?.memberCategory || u?.lastMemberCategory || '').trim().toLowerCase();
+      const memberType = rawCategory && !rawCategory.includes('non-member') ? 'Member' : 'Non-member';
       const sessions =
         typeof latest?.sessions === 'number' && Number.isFinite(latest.sessions) ? latest.sessions : null;
       const sessionsRemaining =
@@ -886,7 +993,7 @@ export default function AdminDashboardPage() {
         gender: u.gender || null,
         phone: u.phone || null,
       };
-    });
+      });
   }, [users, paymentsByUserId]);
 
   function openReceipt(row) {
@@ -975,6 +1082,64 @@ export default function AdminDashboardPage() {
     };
   }, [paidPayments, reportDays]);
 
+  const selectedDayReport = useMemo(() => {
+    const dayMs = dayStartFromInputDate(reportSelectedDate);
+    if (!dayMs) {
+      return {
+        dayMs: 0,
+        total: 0,
+        count: 0,
+        dailyTotal: 0,
+        monthlyTotal: 0,
+        sales: [],
+      };
+    }
+
+    const nextDayMs = dayMs + 24 * 60 * 60 * 1000;
+    const sales = paidPayments
+      .filter((p) => {
+        const paidAtMs = toMillis(p?.paidAt) || toMillis(p?.updatedAt) || 0;
+        return paidAtMs >= dayMs && paidAtMs < nextDayMs;
+      })
+      .sort((a, b) => {
+        const am = toMillis(a?.paidAt) || toMillis(a?.updatedAt) || 0;
+        const bm = toMillis(b?.paidAt) || toMillis(b?.updatedAt) || 0;
+        return bm - am;
+      })
+      .map((p) => {
+        const u = p?.userId ? usersById.get(String(p.userId)) : null;
+        const planKey = normalizePlanKeyFromPayment(p);
+        const amount = typeof p?.amount === 'number' && Number.isFinite(p.amount) ? p.amount : 0;
+        return {
+          id: p?.id || Math.random().toString(36).slice(2),
+          customerId: u?.customerId || u?.memberId || p?.customerId || '—',
+          name: u?.fullName || u?.phone || p?.customerId || p?.userId || '—',
+          plan: planLabel(planKey),
+          planKey,
+          amount,
+          paidAtMs: toMillis(p?.paidAt) || toMillis(p?.updatedAt) || 0,
+        };
+      });
+
+    let total = 0;
+    let dailyTotal = 0;
+    let monthlyTotal = 0;
+    for (const s of sales) {
+      total += s.amount;
+      if (s.planKey === 'daily' || s.planKey === 'elite') dailyTotal += s.amount;
+      if (s.planKey === 'monthly' || s.planKey === 'base') monthlyTotal += s.amount;
+    }
+
+    return {
+      dayMs,
+      total,
+      count: sales.length,
+      dailyTotal,
+      monthlyTotal,
+      sales,
+    };
+  }, [paidPayments, reportSelectedDate, usersById]);
+
   const billing = useMemo(() => {
     const sum = (arr) =>
       arr.reduce((acc, p) => {
@@ -1006,6 +1171,26 @@ export default function AdminDashboardPage() {
       totalRevenue,
     };
   }, [paidPayments, pendingPayments]);
+
+  const monthlySales = useMemo(() => {
+    const byMonth = new Map(); // YYYY-MM -> { key, total, count }
+
+    for (const p of paidPayments) {
+      const paidAtMs = toMillis(p?.paidAt) || toMillis(p?.updatedAt) || toMillis(p?.createdAt) || 0;
+      if (!paidAtMs) continue;
+      const d = new Date(paidAtMs);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const prev = byMonth.get(key) || { key, total: 0, count: 0 };
+      const amt = typeof p?.amount === 'number' && Number.isFinite(p.amount) ? p.amount : 0;
+      byMonth.set(key, { key, total: prev.total + amt, count: prev.count + 1 });
+    }
+
+    const months = Array.from(byMonth.values()).sort((a, b) => (a.key < b.key ? 1 : -1)); // newest first
+    const selected = billingSelectedMonth || (months[0]?.key ?? formatInputDate(Date.now()).slice(0, 7));
+    const selectedRow = byMonth.get(selected) || { key: selected, total: 0, count: 0 };
+
+    return { months, selected, selectedRow };
+  }, [paidPayments, billingSelectedMonth]);
 
   const formatDate = (ts) => {
     const ms = toMillis(ts);
@@ -1161,8 +1346,14 @@ export default function AdminDashboardPage() {
                   <button type="button" className="btn-primary" style={{ padding: '0.55rem 1rem', fontSize: '0.875rem' }} onClick={() => setAddUserModalOpen(true)}>
                     Add User
                   </button>
-                  <button type="button" className="btn-ghost btn-ghost--small" onClick={loadData} disabled={loading}>
-                    Refresh
+                  <button
+                    type="button"
+                    className={`btn-ghost btn-ghost--small admin-refresh-btn ${loading ? 'admin-refresh-btn--loading' : ''}`}
+                    onClick={loadData}
+                    disabled={loading}
+                    aria-busy={loading}
+                  >
+                    <span className="admin-refresh-btn__label">{loading ? 'Refreshing...' : 'Refresh'}</span>
                   </button>
                 </div>
               </div>
@@ -1319,11 +1510,12 @@ export default function AdminDashboardPage() {
                 </div>
                 <button
                   type="button"
-                  className="btn-ghost btn-ghost--small"
+                  className={`btn-ghost btn-ghost--small admin-refresh-btn ${loading ? 'admin-refresh-btn--loading' : ''}`}
                   onClick={loadData}
                   disabled={loading}
+                  aria-busy={loading}
                 >
-                  Refresh
+                  <span className="admin-refresh-btn__label">{loading ? 'Refreshing...' : 'Refresh'}</span>
                 </button>
               </div>
 
@@ -1346,6 +1538,74 @@ export default function AdminDashboardPage() {
                   </article>
                 </div>
               </div>
+
+              <div style={{ padding: '0 1.25rem 0.75rem' }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '0.85rem',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                    <label
+                      className="field__input"
+                      style={{
+                        width: '12rem',
+                        padding: '0.5rem 0.75rem',
+                        fontSize: '0.95rem',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '0.55rem',
+                        borderRadius: '999px',
+                        borderColor: 'rgba(255, 255, 255, 0.26)',
+                        background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.10) 0%, rgba(164, 216, 255, 0.10) 50%, rgba(38, 255, 171, 0.06) 100%)',
+                        boxShadow: '0 18px 34px rgba(0,0,0,0.28), inset 0 0 0 1px rgba(255,255,255,0.06)',
+                        color: 'rgba(248, 252, 255, 0.98)',
+                      }}
+                      aria-label="Select month"
+                      title="Select month"
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ opacity: 0.92 }}>
+                        <path d="M8 2v4M16 2v4M3 10h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                        <rect x="3" y="4" width="18" height="18" rx="3" stroke="currentColor" strokeWidth="2" />
+                      </svg>
+                      <input
+                        type="month"
+                        className="field__input"
+                        style={{
+                          border: 0,
+                          background: 'transparent',
+                          boxShadow: 'none',
+                          padding: 0,
+                          width: '100%',
+                          minHeight: 'unset',
+                          color: 'rgba(255,255,255,0.98)',
+                        }}
+                        value={monthlySales.selected}
+                        onChange={(e) => setBillingSelectedMonth(e.target.value)}
+                        aria-label="Sales month"
+                        disabled={loading}
+                      />
+                    </label>
+
+                    <div>
+                      <div style={{ fontWeight: 850, color: '#ffffff', letterSpacing: '-0.01em' }}>Monthly total sales</div>
+                      <div style={{ color: 'rgba(236, 246, 255, 0.78)', fontSize: '0.9rem', marginTop: '0.1rem' }}>
+                        {monthlySales.selected} · {monthlySales.selectedRow.count} sale{monthlySales.selectedRow.count === 1 ? '' : 's'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: '0.55rem' }}>
+                  <div style={{ fontSize: '1.35rem', fontWeight: 950, color: '#fff', textShadow: '0 0 20px rgba(136, 192, 255, 0.22)' }}>
+                    {loading ? '—' : `PHP ${Number(monthlySales.selectedRow.total || 0).toFixed(2)}`}
+                  </div>
+                </div>
+              </div>
               {markingError && (
                 <p className="form-error" role="alert" style={{ margin: '0.95rem 1.25rem 0' }}>
                   {markingError}
@@ -1362,7 +1622,6 @@ export default function AdminDashboardPage() {
                       <th scope="col">Amount</th>
                       <th scope="col">Status</th>
                       <th scope="col">Paid at</th>
-                      <th scope="col">Action</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1374,7 +1633,7 @@ export default function AdminDashboardPage() {
                       </tr>
                     ) : loading ? (
                       <tr>
-                        <td colSpan={8} style={{ color: 'var(--text-muted)', padding: '1.1rem' }}>
+                        <td colSpan={7} style={{ color: 'var(--text-muted)', padding: '1.1rem' }}>
                           Loading payments...
                         </td>
                       </tr>
@@ -1401,26 +1660,11 @@ export default function AdminDashboardPage() {
                             </span>
                           </td>
                           <td>{formatDate(p.paidAt) || '—'}</td>
-                          <td>
-                            {p.status === 'pending' ? (
-                              <button
-                                type="button"
-                                className="btn-primary"
-                                style={{ padding: '0.55rem 0.95rem', fontSize: '0.8125rem' }}
-                                onClick={() => handleMarkPaymentPaid(p.id)}
-                                disabled={markingPaymentId === p.id}
-                              >
-                                {markingPaymentId === p.id ? 'Marking…' : 'Mark paid'}
-                              </button>
-                            ) : (
-                              <span style={{ color: 'var(--text-muted)' }}>—</span>
-                            )}
-                          </td>
                         </tr>
                       ))
                     ) : (
                       <tr>
-                        <td colSpan={8} style={{ color: 'var(--text-muted)', padding: '1.1rem' }}>
+                        <td colSpan={7} style={{ color: 'var(--text-muted)', padding: '1.1rem' }}>
                           No payments found yet.
                         </td>
                       </tr>
@@ -1438,29 +1682,49 @@ export default function AdminDashboardPage() {
                   <h2 id="reports-heading" className="admin-panel__title">
                     Reports
                   </h2>
-                  <p className="page-subtitle" style={{ margin: 0 }}>
-                    Daily revenue graph (paid payments). Each bar is the total amount paid that day.
-                  </p>
                 </div>
                 <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                  <select
+                  <label
                     className="field__input"
-                    style={{ width: '12rem', padding: '0.55rem 0.8rem', fontSize: '0.95rem' }}
-                    value={dailyReport.days}
-                    onChange={(e) => setReportDays(Number(e.target.value))}
-                    aria-label="Select report range"
+                    style={{
+                      width: '16.5rem',
+                      padding: '0.45rem 0.65rem',
+                      fontSize: '0.95rem',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.5rem',
+                    }}
+                    aria-label="Select date from calendar"
                   >
-                    <option value={7}>Last 7 days</option>
-                    <option value={14}>Last 14 days</option>
-                    <option value={30}>Last 30 days</option>
-                  </select>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ opacity: 0.85 }}>
+                      <path d="M8 2v4M16 2v4M3 10h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                      <rect x="3" y="4" width="18" height="18" rx="3" stroke="currentColor" strokeWidth="2" />
+                    </svg>
+                    <input
+                      type="date"
+                      className="field__input"
+                      style={{
+                        border: 0,
+                        background: 'transparent',
+                        boxShadow: 'none',
+                        padding: 0,
+                        width: '100%',
+                        minHeight: 'unset',
+                      }}
+                      value={reportSelectedDate}
+                      max={formatInputDate(Date.now())}
+                      onChange={(e) => setReportSelectedDate(e.target.value)}
+                      aria-label="Sales date"
+                    />
+                  </label>
                   <button
                     type="button"
-                    className="btn-ghost btn-ghost--small"
+                    className={`btn-ghost btn-ghost--small admin-refresh-btn ${loading ? 'admin-refresh-btn--loading' : ''}`}
                     onClick={loadData}
                     disabled={loading}
+                    aria-busy={loading}
                   >
-                    Refresh
+                    <span className="admin-refresh-btn__label">{loading ? 'Refreshing...' : 'Refresh'}</span>
                   </button>
                 </div>
               </div>
@@ -1468,23 +1732,26 @@ export default function AdminDashboardPage() {
               <div style={{ padding: '1.1rem 1.25rem' }}>
                 <div className="billing-summary" aria-label="Daily report summary" style={{ marginTop: 0, maxWidth: 'none' }}>
                   <article className="billing-summary__tile">
-                    <p className="billing-summary__label">Total revenue</p>
-                    <p className="billing-summary__value">
-                      {loading ? '—' : `PHP ${Number(dailyReport.sumTotal || 0).toFixed(2)}`}
-                    </p>
-                    <p className="billing-summary__meta">{loading ? '—' : `${dailyReport.days} days (paid)`}</p>
+                    <p className="billing-summary__label">Daily sales</p>
+                    <p className="billing-summary__value">{loading ? '—' : `PHP ${Number(selectedDayReport.dailyTotal || 0).toFixed(2)}`}</p>
+                    <p className="billing-summary__meta">Daily plan (paid)</p>
                   </article>
                   <article className="billing-summary__tile">
-                    <p className="billing-summary__label">Payments</p>
-                    <p className="billing-summary__value">{loading ? '—' : dailyReport.sumCount}</p>
-                    <p className="billing-summary__meta">Paid transactions</p>
+                    <p className="billing-summary__label">Monthly sales</p>
+                    <p className="billing-summary__value">{loading ? '—' : `PHP ${Number(selectedDayReport.monthlyTotal || 0).toFixed(2)}`}</p>
+                    <p className="billing-summary__meta">Monthly plan (paid)</p>
                   </article>
                   <article className="billing-summary__tile">
-                    <p className="billing-summary__label">Daily vs Monthly</p>
+                    <p className="billing-summary__label">Total sales</p>
                     <p className="billing-summary__value">
-                      {loading ? '—' : `PHP ${Number(dailyReport.sumDaily || 0).toFixed(2)} / PHP ${Number(dailyReport.sumMonthly || 0).toFixed(2)}`}
+                      {loading ? '—' : `PHP ${Number(selectedDayReport.total || 0).toFixed(2)}`}
                     </p>
-                    <p className="billing-summary__meta">Daily / Monthly revenue</p>
+                    <p className="billing-summary__meta">{loading ? '—' : formatLongDayLabel(selectedDayReport.dayMs)}</p>
+                  </article>
+                  <article className="billing-summary__tile">
+                    <p className="billing-summary__label">Transactions</p>
+                    <p className="billing-summary__value">{loading ? '—' : selectedDayReport.count}</p>
+                    <p className="billing-summary__meta">Paid sales on selected date</p>
                   </article>
                 </div>
 
@@ -1499,10 +1766,65 @@ export default function AdminDashboardPage() {
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
                     <div>
-                      <div style={{ fontWeight: 700, letterSpacing: '0.02em' }}>Daily revenue</div>
-                      <div style={{ color: 'var(--text-muted)', fontSize: '0.95rem', marginTop: '0.2rem' }}>
-                        Trend line + area chart. Move your mouse over the chart to see the exact value for a day.
-                      </div>
+                      <div style={{ fontWeight: 700, letterSpacing: '0.02em' }}>Sales on {formatLongDayLabel(selectedDayReport.dayMs)}</div>
+                    </div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '0.95rem' }}>
+                      Total sales: {formatPhp(selectedDayReport.total)}
+                    </div>
+                  </div>
+
+                  <div className="table-wrap" style={{ marginTop: '0.2rem' }}>
+                    <table className="data-table" aria-label="Sales on selected day">
+                      <thead>
+                        <tr>
+                          <th scope="col">Customer ID</th>
+                          <th scope="col">Name</th>
+                          <th scope="col">Plan</th>
+                          <th scope="col">Amount</th>
+                          <th scope="col">Paid time</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {loading ? (
+                          <tr>
+                            <td colSpan={5} style={{ color: 'var(--text-muted)', padding: '1.1rem' }}>
+                              Loading sales...
+                            </td>
+                          </tr>
+                        ) : selectedDayReport.sales.length ? (
+                          selectedDayReport.sales.map((sale) => (
+                            <tr key={sale.id}>
+                              <td>{sale.customerId}</td>
+                              <td>{sale.name}</td>
+                              <td>{sale.plan}</td>
+                              <td>{formatPhp(sale.amount)}</td>
+                              <td>{sale.paidAtMs ? new Date(sale.paidAtMs).toLocaleTimeString() : '—'}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={5} style={{ color: 'var(--text-muted)', padding: '1.1rem' }}>
+                              No paid sales found on this date.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    marginTop: '1rem',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    borderRadius: '14px',
+                    padding: '1rem',
+                    background: 'rgba(0,0,0,0.18)',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+                    <div>
+                      <div style={{ fontWeight: 700, letterSpacing: '0.02em' }}>Recent trend</div>
                     </div>
                     <div style={{ color: 'var(--text-muted)', fontSize: '0.95rem' }}>
                       Peak day: {dailyReport.maxTotal ? formatPhp(dailyReport.maxTotal) : '—'}
@@ -1525,12 +1847,13 @@ export default function AdminDashboardPage() {
                   <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
                     <button
                       type="button"
-                      className="btn-ghost btn-ghost--small"
+                      className={`btn-ghost btn-ghost--small admin-refresh-btn ${pricingReloading ? 'admin-refresh-btn--loading' : ''}`}
                       onClick={reloadPricingSettings}
                       disabled={pricingLoading || pricingReloading || pricingSaving}
                       title="Reload pricing settings"
+                      aria-busy={pricingReloading}
                     >
-                      {pricingReloading ? 'Reloading…' : 'Reload'}
+                      <span className="admin-refresh-btn__label">{pricingReloading ? 'Reloading...' : 'Reload'}</span>
                     </button>
                     <button
                       type="submit"
@@ -1557,27 +1880,23 @@ export default function AdminDashboardPage() {
                   <h3 className="reg-section__title" style={{ margin: '1rem 0 0.75rem' }}>
                     Member — price &amp; coach sessions
                   </h3>
-                  <p className="payment-hint" style={{ margin: '0 0 0.65rem' }}>
-                    Prices and default session counts for clients who select <strong>Member</strong> on the payment form. Members cannot change amount or sessions; only admins can adjust them here.
-                  </p>
                   <div className="form-grid form-grid--2">
                     <label className="field"><span className="field__label">Monthly price (PHP)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.tiers.member.monthly} onChange={(e) => setPricing((p) => ({ ...p, tiers: { ...p.tiers, member: { ...p.tiers.member, monthly: Number(e.target.value) } } }))} required /></label>
+                    <label className="field"><span className="field__label">Membership price (PHP)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.tiers.member.membership} onChange={(e) => setPricing((p) => ({ ...p, tiers: { ...p.tiers, member: { ...p.tiers.member, membership: Number(e.target.value) } } }))} required /></label>
                     <label className="field"><span className="field__label">Monthly sessions (members)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.sessionDefaults.member.monthly} onChange={(e) => setPricing((p) => ({ ...p, sessionDefaults: { ...p.sessionDefaults, member: { ...p.sessionDefaults.member, monthly: Math.max(1, Math.floor(Number(e.target.value)) || 1) } } }))} required /></label>
-                    <label className="field"><span className="field__label">Daily price (PHP)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.tiers.member.daily} onChange={(e) => setPricing((p) => ({ ...p, tiers: { ...p.tiers, member: { ...p.tiers.member, daily: Number(e.target.value) } } }))} required /></label>
-                    <label className="field"><span className="field__label">Daily sessions (members)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.sessionDefaults.member.daily} onChange={(e) => setPricing((p) => ({ ...p, sessionDefaults: { ...p.sessionDefaults, member: { ...p.sessionDefaults.member, daily: Math.max(1, Math.floor(Number(e.target.value)) || 1) } } }))} required /></label>
+                    <label className="field"><span className="field__label">Walk in price (PHP)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.tiers.member.daily} onChange={(e) => setPricing((p) => ({ ...p, tiers: { ...p.tiers, member: { ...p.tiers.member, daily: Number(e.target.value) } } }))} required /></label>
+                    <label className="field"><span className="field__label">Walk-in sessions (members)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.sessionDefaults.member.daily} onChange={(e) => setPricing((p) => ({ ...p, sessionDefaults: { ...p.sessionDefaults, member: { ...p.sessionDefaults.member, daily: Math.max(1, Math.floor(Number(e.target.value)) || 1) } } }))} required /></label>
                   </div>
 
                   <h3 className="reg-section__title" style={{ margin: '1.25rem 0 0.75rem' }}>
                     Non-member — price &amp; coach sessions
                   </h3>
-                  <p className="payment-hint" style={{ margin: '0 0 0.65rem' }}>
-                    Same plans for clients who select <strong>Non-member</strong>. You can set different daily/monthly prices and session counts than for members.
-                  </p>
                   <div className="form-grid form-grid--2">
                     <label className="field"><span className="field__label">Monthly price (PHP)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.tiers.nonMember.monthly} onChange={(e) => setPricing((p) => ({ ...p, tiers: { ...p.tiers, nonMember: { ...p.tiers.nonMember, monthly: Number(e.target.value) } } }))} required /></label>
+                    <label className="field"><span className="field__label">Membership price (PHP)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.tiers.nonMember.membership} onChange={(e) => setPricing((p) => ({ ...p, tiers: { ...p.tiers, nonMember: { ...p.tiers.nonMember, membership: Number(e.target.value) } } }))} required /></label>
                     <label className="field"><span className="field__label">Monthly sessions (non-members)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.sessionDefaults.nonMember.monthly} onChange={(e) => setPricing((p) => ({ ...p, sessionDefaults: { ...p.sessionDefaults, nonMember: { ...p.sessionDefaults.nonMember, monthly: Math.max(1, Math.floor(Number(e.target.value)) || 1) } } }))} required /></label>
-                    <label className="field"><span className="field__label">Daily price (PHP)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.tiers.nonMember.daily} onChange={(e) => setPricing((p) => ({ ...p, tiers: { ...p.tiers, nonMember: { ...p.tiers.nonMember, daily: Number(e.target.value) } } }))} required /></label>
-                    <label className="field"><span className="field__label">Daily sessions (non-members)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.sessionDefaults.nonMember.daily} onChange={(e) => setPricing((p) => ({ ...p, sessionDefaults: { ...p.sessionDefaults, nonMember: { ...p.sessionDefaults.nonMember, daily: Math.max(1, Math.floor(Number(e.target.value)) || 1) } } }))} required /></label>
+                    <label className="field"><span className="field__label">Walk in price (PHP)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.tiers.nonMember.daily} onChange={(e) => setPricing((p) => ({ ...p, tiers: { ...p.tiers, nonMember: { ...p.tiers.nonMember, daily: Number(e.target.value) } } }))} required /></label>
+                    <label className="field"><span className="field__label">Walk-in sessions (non-members)</span><input className="field__input" type="number" inputMode="numeric" min={1} value={pricing.sessionDefaults.nonMember.daily} onChange={(e) => setPricing((p) => ({ ...p, sessionDefaults: { ...p.sessionDefaults, nonMember: { ...p.sessionDefaults.nonMember, daily: Math.max(1, Math.floor(Number(e.target.value)) || 1) } } }))} required /></label>
                   </div>
                 </div>
               </form>
@@ -1823,8 +2142,9 @@ export default function AdminDashboardPage() {
               <table className="data-table" aria-label="Payment history">
                 <thead>
                   <tr>
-                    <th scope="col">Ref</th>
                     <th scope="col">Plan</th>
+                      <th scope="col">Start</th>
+                      <th scope="col">End</th>
                     <th scope="col">Sessions</th>
                     <th scope="col">Amount</th>
                     <th scope="col">Status</th>
@@ -1837,10 +2157,12 @@ export default function AdminDashboardPage() {
                     receiptUser.payments.map((p) => {
                       const planKey = normalizePlanKeyFromPayment(p);
                       const plan = planLabel(planKey);
+                        const range = inferredStartEndForPayment(p);
                       return (
                         <tr key={p.id}>
-                          <td>{p.id}</td>
                           <td>{plan}</td>
+                            <td>{range.start}</td>
+                            <td>{range.end}</td>
                           <td>{typeof p.sessions === 'number' && Number.isFinite(p.sessions) ? p.sessions : '—'}</td>
                           <td>{typeof p.amount === 'number' ? `PHP ${p.amount.toFixed(2)}` : '—'}</td>
                           <td>

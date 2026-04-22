@@ -12,8 +12,56 @@ function toMillis(ts) {
   return Number.isFinite(ms) ? ms : 0;
 }
 
+function normalizePlanKey(value) {
+  const v = String(value || '')
+    .trim()
+    .toLowerCase();
+  if (!v) return null;
+  if (v === 'base') return 'monthly';
+  if (v === 'pro') return 'weekly';
+  if (v === 'elite') return 'daily';
+  if (v === 'walk-in') return 'walkin';
+  if (v.includes('walk')) return 'walkin';
+  if (v.includes('daily')) return 'daily';
+  if (v.includes('weekly')) return 'weekly';
+  if (v.includes('monthly') || v.includes('membership')) return 'monthly';
+  return null;
+}
+
+function inferPlanKey(payment) {
+  return (
+    normalizePlanKey(payment?.courseId) ||
+    normalizePlanKey(payment?.plan) ||
+    normalizePlanKey(payment?.planType) ||
+    null
+  );
+}
+
+function resolveMembershipEndMs(payment) {
+  const explicit = toMillis(payment?.endDate);
+  if (explicit) return explicit;
+
+  const planKey = inferPlanKey(payment);
+  if (planKey !== 'monthly') return 0;
+
+  const paidMs =
+    toMillis(payment?.paidAt) ||
+    toMillis(payment?.updatedAt) ||
+    toMillis(payment?.createdAt) ||
+    toMillis(payment?.submittedAt);
+  if (!paidMs) return 0;
+
+  return paidMs + 30 * 24 * 60 * 60 * 1000;
+}
+
+function isStillActive(payment) {
+  const endMs = resolveMembershipEndMs(payment);
+  if (!endMs) return true;
+  return endMs >= Date.now();
+}
+
 function hasPaidMembership(payments) {
-  const paid = payments.filter((p) => p.status === 'paid');
+  const paid = payments.filter((p) => p.status === 'paid' && isStillActive(p));
   if (!paid.length) return null;
 
   paid.sort((a, b) => {

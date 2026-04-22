@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { checkBalanceUseSession, createPaymentRequest, getPricingSettings } from '../services/payments';
+import { checkBalanceUseSession, createPaymentRequest, getMemberCategoryQuote, getPricingSettings, getWalkInQuote } from '../services/payments';
+
+const PRICING_SYNC_CHANNEL = 'clutch-pricing-sync';
 
 function normalizePortalCustomerId(raw) {
   return String(raw || '')
@@ -38,13 +40,21 @@ export default function PaymentPage() {
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [standardPrices, setStandardPrices] = useState({ base: 49, pro: 79, elite: 119 });
   const [tierPrices, setTierPrices] = useState({
-    member: { monthly: 49, daily: 119 },
-    nonMember: { monthly: 49, daily: 119 },
+    member: { monthly: 49, membership: 49, daily: 119 },
+    nonMember: { monthly: 49, membership: 49, daily: 119 },
   });
   const [sessionDefaults, setSessionDefaults] = useState({
     member: { monthly: 10, daily: 1 },
     nonMember: { monthly: 10, daily: 1 },
   });
+  const [walkInQuote, setWalkInQuote] = useState({
+    amount: null,
+    regularAmount: null,
+    discountedAmount: null,
+    eligibleForReturningDiscount: false,
+    tierKey: null,
+  });
+  const [walkInQuoteLoading, setWalkInQuoteLoading] = useState(false);
 
   const formatDateInput = (d) => {
     if (!(d instanceof Date)) return '';
@@ -79,11 +89,13 @@ export default function PaymentPage() {
   // Payment form fields (UI-only for now; backend decides final pricing).
   const [customerId, setCustomerId] = useState('');
   const [amount, setAmount] = useState(800);
-  const [planType, setPlanType] = useState('Monthly');
+  const [paymentFlow, setPaymentFlow] = useState('Monthly Payment');
   const [paymentMethod, setPaymentMethod] = useState('Cash');
   const [startDate, setStartDate] = useState(initialStartDate);
   const [endDate, setEndDate] = useState(initialEndDate);
   const [memberCategory, setMemberCategory] = useState('Member');
+  const [memberCategoryLocked, setMemberCategoryLocked] = useState(false);
+  const [memberCategoryDetecting, setMemberCategoryDetecting] = useState(false);
   const [sessions, setSessions] = useState(10);
 
   const [portalCustomerId, setPortalCustomerId] = useState('');
@@ -91,16 +103,18 @@ export default function PaymentPage() {
   const [balanceError, setBalanceError] = useState('');
   const [balanceResult, setBalanceResult] = useState(null);
 
-  // Pricing tier selection (planKey stored in payment.courseId):
-  // - Daily    -> 'daily'
-  // - Monthly  -> 'monthly'
-  // - (Walk-in removed)
+  const isWalkInSession = paymentFlow === 'Walk-in Session';
+  const isMembershipPayment = paymentFlow === 'Membership Payment';
+  const isMonthlyPayment = paymentFlow === 'Monthly Payment';
+  const effectiveMemberCategory = isWalkInSession ? 'Walk-in Client' : isMembershipPayment ? 'Member' : memberCategory;
+
+  // Pricing tier selection (planKey stored in payment.courseId)
   const computedPlanKey = useMemo(() => {
-    const normalized = String(planType || '').trim().toLowerCase();
-    if (normalized === 'daily') return 'daily';
-    if (normalized === 'monthly') return 'monthly';
+    if (isWalkInSession) return 'daily';
+    if (isMembershipPayment) return 'membership';
+    if (isMonthlyPayment) return 'monthly';
     return 'monthly';
-  }, [planType]);
+  }, [isWalkInSession, isMembershipPayment, isMonthlyPayment]);
 
   const loadPricingSettings = useCallback(async () => {
     try {
@@ -119,10 +133,16 @@ export default function PaymentPage() {
       setTierPrices({
         member: {
           monthly: Number.isFinite(Number(memberTier.monthly)) ? Number(memberTier.monthly) : Number(standard.base || 49),
+          membership: Number.isFinite(Number(memberTier.membership))
+            ? Number(memberTier.membership)
+            : Number(memberTier.monthly || standard.base || 49),
           daily: Number.isFinite(Number(memberTier.daily)) ? Number(memberTier.daily) : Number(standard.elite || 119),
         },
         nonMember: {
           monthly: Number.isFinite(Number(nonMemberTier.monthly)) ? Number(nonMemberTier.monthly) : Number(standard.base || 49),
+          membership: Number.isFinite(Number(nonMemberTier.membership))
+            ? Number(nonMemberTier.membership)
+            : Number(nonMemberTier.monthly || standard.base || 49),
           daily: Number.isFinite(Number(nonMemberTier.daily)) ? Number(nonMemberTier.daily) : Number(standard.elite || 119),
         },
       });
@@ -156,26 +176,152 @@ export default function PaymentPage() {
     };
   }, [loadPricingSettings]);
 
+  useEffect(() => {
+    const onStorage = (event) => {
+      if (event.key === 'clutch_pricing_updated_at') {
+        loadPricingSettings();
+      }
+    };
+    window.addEventListener('storage', onStorage);
+
+    let channel = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      channel = new BroadcastChannel(PRICING_SYNC_CHANNEL);
+      channel.onmessage = (event) => {
+        if (event?.data?.type === 'pricing-updated') {
+          loadPricingSettings();
+        }
+      };
+    }
+
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      if (channel) channel.close();
+    };
+  }, [loadPricingSettings]);
+
   const tierSessionDefaults = useMemo(() => {
-    const t = String(memberCategory || '').trim().toLowerCase() === 'non-member' ? 'nonMember' : 'member';
+    const t = String(effectiveMemberCategory || '').trim().toLowerCase() === 'non-member' ? 'nonMember' : 'member';
     return sessionDefaults[t] || sessionDefaults.member;
-  }, [memberCategory, sessionDefaults]);
+  }, [effectiveMemberCategory, sessionDefaults]);
 
   useEffect(() => {
-    const next =
-      computedPlanKey === 'monthly'
-        ? tierSessionDefaults.monthly
-        : computedPlanKey === 'daily'
-          ? tierSessionDefaults.daily
-          : 1;
+    const next = isWalkInSession ? 1 : isMembershipPayment ? tierSessionDefaults.monthly : tierSessionDefaults.monthly;
     setSessions(next);
-  }, [computedPlanKey, tierSessionDefaults.monthly, tierSessionDefaults.daily]);
+  }, [isWalkInSession, isMembershipPayment, tierSessionDefaults.monthly]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadWalkInQuote() {
+      if (!isWalkInSession || !user?.uid) {
+        if (!cancelled) {
+          setWalkInQuote({
+            amount: null,
+            regularAmount: null,
+            discountedAmount: null,
+            eligibleForReturningDiscount: false,
+            tierKey: null,
+          });
+        }
+        return;
+      }
+
+      setWalkInQuoteLoading(true);
+      try {
+        const quote = await getWalkInQuote({ customerId });
+        if (cancelled) return;
+        const amount = Number(quote?.amount);
+        const regularAmount = Number(quote?.regularAmount);
+        const discountedAmount = Number(quote?.discountedAmount);
+        const normalized = {
+          amount: Number.isFinite(amount) ? amount : null,
+          regularAmount: Number.isFinite(regularAmount) ? regularAmount : null,
+          discountedAmount: Number.isFinite(discountedAmount) ? discountedAmount : null,
+          eligibleForReturningDiscount: Boolean(quote?.eligibleForReturningDiscount),
+          tierKey: String(quote?.tierKey || '').trim() || null,
+        };
+        setWalkInQuote(normalized);
+        if (Number.isFinite(normalized.amount) && normalized.amount > 0) {
+          setAmount(normalized.amount);
+        }
+      } catch {
+        if (!cancelled) {
+          setWalkInQuote({
+            amount: null,
+            regularAmount: null,
+            discountedAmount: null,
+            eligibleForReturningDiscount: false,
+            tierKey: null,
+          });
+        }
+      } finally {
+        if (!cancelled) setWalkInQuoteLoading(false);
+      }
+    }
+
+    loadWalkInQuote();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isWalkInSession, user?.uid, customerId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function detectMemberCategory() {
+      if (!isMonthlyPayment || !user?.uid) {
+        setMemberCategoryLocked(false);
+        return;
+      }
+
+      const typedCustomerId = String(customerId || '').trim();
+      if (!typedCustomerId) {
+        setMemberCategoryLocked(false);
+        return;
+      }
+
+      setMemberCategoryDetecting(true);
+      try {
+        const quote = await getMemberCategoryQuote({ customerId: typedCustomerId });
+        if (cancelled) return;
+        const normalized = String(quote?.memberCategory || '').trim().toLowerCase();
+        if (normalized === 'member' || normalized === 'non-member') {
+          setMemberCategory(normalized === 'non-member' ? 'Non-member' : 'Member');
+          setMemberCategoryLocked(Boolean(quote?.lock));
+          return;
+        }
+        setMemberCategoryLocked(false);
+      } catch {
+        if (!cancelled) setMemberCategoryLocked(false);
+      } finally {
+        if (!cancelled) setMemberCategoryDetecting(false);
+      }
+    }
+
+    detectMemberCategory();
+    return () => {
+      cancelled = true;
+    };
+  }, [isMonthlyPayment, customerId, user?.uid]);
 
   // Keep amount in sync with admin pricing.
   useEffect(() => {
     if (!computedPlanKey) return;
 
-    const tierKey = String(memberCategory || '').trim().toLowerCase() === 'non-member' ? 'nonMember' : 'member';
+    if (isWalkInSession) {
+      const walkInAmount = Number(walkInQuote?.amount);
+      if (Number.isFinite(walkInAmount) && walkInAmount > 0) {
+        setAmount(walkInAmount);
+        return;
+      }
+    }
+
+    const tierKey =
+      isWalkInSession || isMembershipPayment || String(memberCategory || '').trim().toLowerCase() !== 'non-member'
+        ? 'member'
+        : 'nonMember';
     const price = Number(tierPrices?.[tierKey]?.[computedPlanKey]);
     if (Number.isFinite(price) && price > 0) {
       setAmount(price);
@@ -185,11 +331,15 @@ export default function PaymentPage() {
     // Fallback to old settings shape.
     if (computedPlanKey === 'daily' && Number.isFinite(standardPrices?.elite) && standardPrices.elite > 0) setAmount(standardPrices.elite);
     if (computedPlanKey === 'monthly' && Number.isFinite(standardPrices?.base) && standardPrices.base > 0) setAmount(standardPrices.base);
-  }, [computedPlanKey, memberCategory, tierPrices, standardPrices]);
+  }, [computedPlanKey, memberCategory, tierPrices, standardPrices, isWalkInSession, isMembershipPayment, walkInQuote?.amount]);
 
   useEffect(() => {
-    setEndDate(buildEndDateByPlan(planType));
-  }, [planType, buildEndDateByPlan]);
+    if (isMonthlyPayment) {
+      setEndDate(buildEndDateByPlan('monthly'));
+      return;
+    }
+    setEndDate('');
+  }, [isMonthlyPayment, buildEndDateByPlan]);
 
   async function createPaymentAndNavigate(planKey) {
     setError('');
@@ -208,18 +358,21 @@ export default function PaymentPage() {
           // Stored on the payment request so admin can confirm it manually.
           customerId,
           amount,
-          planType,
-          memberCategory,
+          planType: paymentFlow,
+          memberCategory: effectiveMemberCategory,
           paymentMethod,
-          startDate,
-          endDate,
-          sessions,
+          startDate: isMonthlyPayment ? startDate : null,
+          endDate: isMonthlyPayment ? endDate : null,
+          sessions: isWalkInSession ? 1 : isMembershipPayment ? tierSessionDefaults.monthly : sessions,
           userId: user.uid,
         },
       });
 
       const paymentId = res?.paymentId;
       const serverAmount = res?.amount;
+      const walkInEligibleForReturningDiscount = Boolean(res?.walkInEligibleForReturningDiscount);
+      const walkInRegularAmount = Number(res?.walkInRegularAmount);
+      const walkInDiscountedAmount = Number(res?.walkInDiscountedAmount);
       if (!paymentId) {
         throw new Error('Payment request failed (missing payment reference).');
       }
@@ -233,12 +386,15 @@ export default function PaymentPage() {
           userId: user.uid,
           customerId,
           amount: finalAmount,
-          planType,
-          memberCategory,
+          planType: paymentFlow,
+          memberCategory: effectiveMemberCategory,
           paymentMethod,
-          startDate,
-          endDate,
-          sessions,
+          startDate: isMonthlyPayment ? startDate : null,
+          endDate: isMonthlyPayment ? endDate : null,
+          sessions: isWalkInSession ? 1 : isMembershipPayment ? tierSessionDefaults.monthly : sessions,
+          walkInEligibleForReturningDiscount,
+          walkInRegularAmount: Number.isFinite(walkInRegularAmount) ? walkInRegularAmount : null,
+          walkInDiscountedAmount: Number.isFinite(walkInDiscountedAmount) ? walkInDiscountedAmount : null,
           submittedAt: Date.now(),
         })
       );
@@ -289,12 +445,21 @@ export default function PaymentPage() {
     setError('');
     setCustomerId('');
     setAmount(800);
-    setPlanType('Monthly');
+    setPaymentFlow('Monthly Payment');
     setPaymentMethod('Cash');
     setStartDate(initialStartDate);
     setEndDate(initialEndDate);
     setMemberCategory('Member');
+    setMemberCategoryLocked(false);
+    setMemberCategoryDetecting(false);
     setSessions(sessionDefaults.member.monthly);
+    setWalkInQuote({
+      amount: null,
+      regularAmount: null,
+      discountedAmount: null,
+      eligibleForReturningDiscount: false,
+      tierKey: null,
+    });
   };
 
   return (
@@ -318,104 +483,106 @@ export default function PaymentPage() {
 
             <form className="payment-landing__form" onSubmit={handleSubmit}>
               <div className="payment-form-grid" aria-label="Payment details">
-                <div className="payment-form-col">
-                  <label className="field field--full">
-                    <span className="field__label">Customer ID *</span>
-                    <input
-                      className="field__input"
-                      value={customerId}
-                      onChange={(e) => setCustomerId(e.target.value)}
-                      required
-                    />
-                  </label>
+                <label className="field field--full">
+                  <span className="field__label">Customer ID *</span>
+                  <input className="field__input" value={customerId} onChange={(e) => setCustomerId(e.target.value)} required />
+                </label>
 
-                  <label className="field">
-                    <span className="field__label">Payment Method *</span>
-                    <select className="field__input reg-select" value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}>
-                      <option>Cash</option>
-                      <option>GCASH</option>
-                    </select>
-                  </label>
+                <label className="field field--full">
+                  <span className="field__label">Payment Flow *</span>
+                  <select className="field__input reg-select" value={paymentFlow} onChange={(e) => setPaymentFlow(e.target.value)}>
+                    <option>Walk-in Session</option>
+                    <option>Membership Payment</option>
+                    <option>Monthly Payment</option>
+                  </select>
+                </label>
 
-                  <label className="field">
-                    <span className="field__label">Start Date *</span>
-                    <input
-                      className="field__input"
-                      type="date"
-                      value={startDate}
-                      onChange={(e) => setStartDate(e.target.value)}
-                      disabled={!isAdmin}
-                      required
-                    />
-                  </label>
+                <label className="field">
+                  <span className="field__label">Amount (₱) *</span>
+                  <input
+                    className="field__input"
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    value={amount}
+                    onChange={(e) => setAmount(Number(e.target.value))}
+                    disabled={!isAdmin}
+                    required
+                  />
+                  {/* Walk-in pricing is auto-detected; keep UI clean. */}
+                </label>
 
+                <label className="field">
+                  <span className="field__label">Payment Method *</span>
+                  <select className="field__input reg-select" value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}>
+                    <option>Cash</option>
+                    <option>GCASH</option>
+                  </select>
+                </label>
+
+                {!isWalkInSession && !isMembershipPayment ? (
                   <label className="field field--full">
                     <span className="field__label">Member Category *</span>
                     <select
                       className="field__input reg-select"
                       value={memberCategory}
                       onChange={(e) => setMemberCategory(e.target.value)}
+                      disabled={memberCategoryLocked || memberCategoryDetecting}
                     >
                       <option>Member</option>
                       <option>Non-member</option>
                     </select>
+                    {isMonthlyPayment ? (
+                      <span className="payment-member-note" style={{ display: 'block', marginTop: '0.25rem' }}>
+                        {memberCategoryDetecting
+                          ? 'Detecting member category from Customer ID...'
+                          : memberCategoryLocked
+                          ? `Detected ${memberCategory} account from payment history. Category is locked.`
+                          : 'No locked history found. You may choose category manually.'}
+                      </span>
+                    ) : null}
                   </label>
-                </div>
+                ) : null}
 
-                <div className="payment-form-col">
+                {!isMonthlyPayment ? (
                   <label className="field field--full">
-                    <span className="field__label">Amount (₱) *</span>
-                    <input
-                      className="field__input"
-                      type="number"
-                      inputMode="numeric"
-                      min={1}
-                      value={amount}
-                      onChange={(e) => setAmount(Number(e.target.value))}
-                      disabled={!isAdmin}
-                      required
-                    />
-                  </label>
-
-                  <label className="field field--full">
-                    <span className="field__label">Plan Type *</span>
-                    <select className="field__input reg-select" value={planType} onChange={(e) => setPlanType(e.target.value)}>
-                      <option>Daily</option>
-                      <option>Monthly</option>
-                    </select>
-                  </label>
-
-                  <label className="field field--full">
-                    <span className="field__label">Sessions with coach *</span>
-                    <input
-                      className="field__input"
-                      type="number"
-                      inputMode="numeric"
-                      min={1}
-                      value={sessions}
-                      onChange={(e) => setSessions(Math.max(1, Math.floor(Number(e.target.value)) || 1))}
-                      disabled={!isAdmin}
-                      required
-                    />
+                    <span className="field__label">Sessions with coach</span>
+                    <input className="field__input" type="number" value={isWalkInSession ? 1 : tierSessionDefaults.monthly} readOnly />
                     <span className="payment-member-note" style={{ display: 'block', marginTop: '0.25rem' }}>
-                      {isAdmin
-                        ? `Defaults for ${memberCategory === 'Non-member' ? 'non-members' : 'members'}: Monthly ${tierSessionDefaults.monthly}, Daily ${tierSessionDefaults.daily}. You can override for special cases.`
-                        : `Set by your gym admin for ${memberCategory === 'Non-member' ? 'non-members' : 'members'} (Monthly ${tierSessionDefaults.monthly}, Daily ${tierSessionDefaults.daily}).`}
+                      {isWalkInSession
+                        ? 'Walk-in Session uses 1 coach session.'
+                        : `Membership Payment uses ${tierSessionDefaults.monthly} sessions by default.`}
                     </span>
                   </label>
+                ) : null}
 
-                  <label className="field field--full">
-                    <span className="field__label">End Date *</span>
-                    <input
-                      className="field__input"
-                      type="date"
-                      value={endDate}
-                      onChange={(e) => setEndDate(e.target.value)}
-                      disabled={!isAdmin}
-                      required
-                    />
-                  </label>
-                </div>
+                {isMonthlyPayment ? (
+                  <>
+                    <label className="field">
+                      <span className="field__label">Start Date *</span>
+                      <input
+                        className="field__input"
+                        type="date"
+                        value={startDate}
+                        onChange={(e) => setStartDate(e.target.value)}
+                        disabled={!isAdmin}
+                        required={isMonthlyPayment}
+                      />
+                    </label>
+
+                    <label className="field">
+                      <span className="field__label">End Date *</span>
+                      <input
+                        className="field__input"
+                        type="date"
+                        value={endDate}
+                        onChange={(e) => setEndDate(e.target.value)}
+                        disabled={!isAdmin}
+                        required={isMonthlyPayment}
+                      />
+                    </label>
+                  </>
+                ) : null}
               </div>
 
               <div className="payment-form-actions">
@@ -450,30 +617,48 @@ export default function PaymentPage() {
                       <dt>Amount</dt>
                       <dd>₱{Number(amount || 0).toLocaleString()}</dd>
                     </div>
+                    {isWalkInSession ? (
+                      <div className="summary-row">
+                        <dt>Walk-in member price</dt>
+                        <dd>
+                          {walkInQuote.eligibleForReturningDiscount
+                            ? `Applied (member ₱${Number(walkInQuote.discountedAmount || amount || 0).toLocaleString()}, regular ₱${Number(walkInQuote.regularAmount || 0).toLocaleString()})`
+                            : 'Regular rate applied'}
+                        </dd>
+                      </div>
+                    ) : null}
                     <div className="summary-row">
-                      <dt>Plan Type</dt>
-                      <dd>{planType}</dd>
+                      <dt>Payment Flow</dt>
+                      <dd>{paymentFlow}</dd>
                     </div>
-                    <div className="summary-row">
-                      <dt>Sessions with coach</dt>
-                      <dd>{sessions}</dd>
-                    </div>
-                    <div className="summary-row">
-                      <dt>Member Category</dt>
-                      <dd>{memberCategory}</dd>
-                    </div>
+                    {!isMonthlyPayment ? (
+                      <div className="summary-row">
+                        <dt>Sessions with coach</dt>
+                        <dd>{isWalkInSession ? 1 : tierSessionDefaults.monthly}</dd>
+                      </div>
+                    ) : null}
+                    {!isWalkInSession && !isMembershipPayment ? (
+                      <div className="summary-row">
+                        <dt>Member Category</dt>
+                        <dd>{memberCategory}</dd>
+                      </div>
+                    ) : null}
                     <div className="summary-row">
                       <dt>Payment Method</dt>
                       <dd>{paymentMethod}</dd>
                     </div>
-                    <div className="summary-row">
-                      <dt>Start Date</dt>
-                      <dd>{startDate}</dd>
-                    </div>
-                    <div className="summary-row">
-                      <dt>End Date</dt>
-                      <dd>{endDate}</dd>
-                    </div>
+                    {isMonthlyPayment ? (
+                      <>
+                        <div className="summary-row">
+                          <dt>Start Date</dt>
+                          <dd>{startDate}</dd>
+                        </div>
+                        <div className="summary-row">
+                          <dt>End Date</dt>
+                          <dd>{endDate}</dd>
+                        </div>
+                      </>
+                    ) : null}
                   </dl>
 
                   <div className="payment-form-actions">

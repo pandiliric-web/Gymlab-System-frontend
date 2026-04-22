@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import logo from '../logo.svg';
 
 const HERO_IMAGE =
   'https://images.unsplash.com/photo-1571019614242-c5c5dee9f50b?auto=format&fit=crop&w=2000&q=80';
@@ -8,6 +7,7 @@ const HERO_IMAGE =
 export default function HomePage() {
   const [parallaxY, setParallaxY] = useState(0);
   const heroRef = useRef(null);
+  const pageRef = useRef(null);
   const reduceMotion =
     typeof window !== 'undefined' &&
     window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
@@ -29,8 +29,36 @@ export default function HomePage() {
     };
   }, [updateScroll]);
 
+  useEffect(() => {
+    if (!pageRef.current) return;
+    const revealTargets = pageRef.current.querySelectorAll('[data-reveal]');
+    if (!revealTargets.length) return;
+
+    if (reduceMotion) {
+      revealTargets.forEach((target) => target.classList.add('is-visible'));
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          entry.target.classList.add('is-visible');
+          observer.unobserve(entry.target);
+        });
+      },
+      {
+        threshold: 0.18,
+        rootMargin: '0px 0px -8% 0px',
+      }
+    );
+
+    revealTargets.forEach((target) => observer.observe(target));
+    return () => observer.disconnect();
+  }, [reduceMotion]);
+
   return (
-    <main>
+    <main ref={pageRef}>
       <section className="hero" ref={heroRef}>
         <div
           className="hero__parallax"
@@ -60,7 +88,7 @@ export default function HomePage() {
             <span>Clutch Lab Fitness Gym</span>
           </p>
           <div className="hero__logo-row">
-            <img className="hero__logo" src={logo} alt="Clutch Lab logo" />
+            <img className="hero__logo" src="/logo.png" alt="Clutch Lab logo" />
             <span className="hero__logo-glow" aria-hidden />
           </div>
           <h1 className="hero__title hero__title--animated">
@@ -91,7 +119,7 @@ export default function HomePage() {
 
       <section className="home-section" id="highlights">
         <div className="page-shell">
-          <header className="page-header page-header--center">
+          <header className="page-header page-header--center home-reveal" data-reveal>
             <p className="page-eyebrow">Built for progress</p>
             <h2 className="page-title">Train with structure, coaching, and momentum</h2>
             <p className="page-subtitle">
@@ -101,7 +129,7 @@ export default function HomePage() {
           </header>
 
           <div className="home-grid home-grid--3" aria-label="Highlights">
-            <article className="home-card home-card--feature">
+            <article className="home-card home-card--feature home-reveal" data-reveal>
               <div className="home-card__icon" aria-hidden>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
                   <path
@@ -122,7 +150,7 @@ export default function HomePage() {
               <p className="home-card__desc">Progressive training that’s planned, tracked, and coached—so results are earned.</p>
             </article>
 
-            <article className="home-card home-card--feature">
+            <article className="home-card home-card--feature home-reveal home-reveal--delay-1" data-reveal>
               <div className="home-card__icon" aria-hidden>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
                   <path
@@ -153,7 +181,7 @@ export default function HomePage() {
               <p className="home-card__desc">Ongoing feedback on technique, effort, and progression—tailored to your pace.</p>
             </article>
 
-            <article className="home-card home-card--feature">
+            <article className="home-card home-card--feature home-reveal home-reveal--delay-2" data-reveal>
               <div className="home-card__icon" aria-hidden>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
                   <path
@@ -179,24 +207,24 @@ export default function HomePage() {
 
       <section className="home-section home-section--alt" id="how-it-works">
         <div className="page-shell">
-          <header className="page-header page-header--center">
+          <header className="page-header page-header--center home-reveal" data-reveal>
             <p className="page-eyebrow">Getting started</p>
             <h2 className="page-title">How it works</h2>
             <p className="page-subtitle">A straightforward flow from registration to access.</p>
           </header>
 
           <div className="home-grid home-grid--3 home-grid--steps" aria-label="How it works steps">
-            <div className="home-step">
+            <div className="home-step home-reveal" data-reveal>
               <div className="home-step__num">1</div>
               <h3 className="home-step__title">Register</h3>
               <p className="home-step__desc">Complete your details and agree to the gym waiver.</p>
             </div>
-            <div className="home-step">
+            <div className="home-step home-reveal home-reveal--delay-1" data-reveal>
               <div className="home-step__num">2</div>
               <h3 className="home-step__title">Pay</h3>
               <p className="home-step__desc">Submit payment and confirm your passcode/access.</p>
             </div>
-            <div className="home-step">
+            <div className="home-step home-reveal home-reveal--delay-2" data-reveal>
               <div className="home-step__num">3</div>
               <h3 className="home-step__title">Train</h3>
               <p className="home-step__desc">Use your member portal and start following your plan.</p>
@@ -207,14 +235,14 @@ export default function HomePage() {
 
       <section className="home-section" id="faq">
         <div className="page-shell">
-          <header className="page-header page-header--center">
+          <header className="page-header page-header--center home-reveal" data-reveal>
             <p className="page-eyebrow">FAQ</p>
             <h2 className="page-title">Questions, answered</h2>
             <p className="page-subtitle">Everything you need to feel confident before you register.</p>
           </header>
 
           <div className="home-faq" aria-label="Frequently asked questions">
-            <details className="home-faq__item">
+            <details className="home-faq__item home-reveal" data-reveal>
               <summary>How do I get started?</summary>
               <p>
                 Click <strong>Start Registration</strong>, complete your details and waiver, then proceed to payment.
@@ -222,21 +250,21 @@ export default function HomePage() {
               </p>
             </details>
 
-            <details className="home-faq__item">
+            <details className="home-faq__item home-reveal home-reveal--delay-1" data-reveal>
               <summary>Do I need gym experience?</summary>
               <p>
                 No. The focus is on technique, consistency, and progression. Coaches help you build confidence and move safely.
               </p>
             </details>
 
-            <details className="home-faq__item">
+            <details className="home-faq__item home-reveal home-reveal--delay-2" data-reveal>
               <summary>What kind of training do you offer?</summary>
               <p>
                 Strength-focused coaching with structured programs, feedback, and practical nutrition support to help you stay on track.
               </p>
             </details>
 
-            <details className="home-faq__item">
+            <details className="home-faq__item home-reveal home-reveal--delay-3" data-reveal>
               <summary>Can I contact the gym before registering?</summary>
               <p>
                 If you need help, you can start by registering and then use your member access flow to manage your account.
@@ -249,7 +277,7 @@ export default function HomePage() {
 
       <section className="home-section home-section--cta" aria-label="Call to action">
         <div className="page-shell">
-          <div className="home-cta">
+          <div className="home-cta home-reveal" data-reveal>
             <div className="home-cta__copy">
               <p className="page-eyebrow">Clutch your best self</p>
               <h2 className="page-title">Ready to train with structure?</h2>

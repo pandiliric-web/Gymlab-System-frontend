@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import logo from '../logo.svg';
 
 const NAV_LINKS = [
   { label: 'Home', to: '/' },
@@ -61,7 +60,7 @@ export default function Layout() {
       <header className={`site-header ${scrolled ? 'site-header--scrolled' : ''}`}>
         <div className="site-header__inner">
           <NavLink className="brand" to="/" onClick={closeMenu} end>
-            <img className="brand__logo" src={logo} alt="Clutch Lab Fitness logo" />
+            <img className="brand__logo" src="/logo.png" alt="Clutch Lab Fitness logo" />
             <span className="brand__text">Clutch Lab Fitness Portal</span>
           </NavLink>
 

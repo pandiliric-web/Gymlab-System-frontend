@@ -27,6 +27,14 @@ export async function createWalkInClient(payload) {
   return apiRequest('/api/admin/walkin', { method: 'POST', body: payload || {} });
 }
 
+export async function getWalkInQuote(payload = {}) {
+  return apiRequest('/api/payments/walkin-quote', { method: 'POST', body: payload || {} });
+}
+
+export async function getMemberCategoryQuote(payload = {}) {
+  return apiRequest('/api/payments/member-category-quote', { method: 'POST', body: payload || {} });
+}
+
 export async function createPaymentRequest(courseId) {
   const requestPayload =
     typeof courseId === 'string'
