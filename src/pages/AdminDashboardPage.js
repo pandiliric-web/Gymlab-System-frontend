@@ -427,6 +427,27 @@ function parseDateMs(dateValue) {
   return Number.isFinite(ms) ? ms : null;
 }
 
+function resolvePaymentEndMs(payment) {
+  if (!payment) return null;
+  const explicitEnd = parseDateMs(payment?.endDate);
+  if (explicitEnd) return explicitEnd;
+
+  const planKey = normalizePlanKeyFromPayment(payment);
+  const anchorMs = toMillis(payment?.paidAt) || toMillis(payment?.updatedAt) || toMillis(payment?.createdAt) || toMillis(payment?.submittedAt) || 0;
+  if (!anchorMs) return null;
+
+  if (planKey === 'daily' || planKey === 'walkin' || planKey === 'elite') {
+    return anchorMs + 24 * 60 * 60 * 1000;
+  }
+  if (planKey === 'weekly' || planKey === 'pro') {
+    return anchorMs + 7 * 24 * 60 * 60 * 1000;
+  }
+  if (planKey === 'monthly' || planKey === 'base') {
+    return anchorMs + 30 * 24 * 60 * 60 * 1000;
+  }
+  return null;
+}
+
 /** Table placeholder when customerId is empty (—, -, en dash). */
 function isPlaceholderCustomerId(value) {
   const t = String(value || '').trim();
@@ -958,23 +979,24 @@ export default function AdminDashboardPage() {
       });
       const pendingPaymentId = pendingSorted[0]?.id || null;
       const pendingCount = pendingSorted.length;
+      const planKey = normalizePlanKeyFromPayment(latest);
 
       let status = 'Inactive';
       if (latest?.status === 'paid') {
-        const endDateMs = parseDateMs(latest?.endDate);
+        const endDateMs = resolvePaymentEndMs(latest);
         status = endDateMs && endDateMs < now ? 'Inactive' : 'Active';
       } else if (latest?.status === 'pending') {
         status = 'Pending';
       }
 
-      const planKey = normalizePlanKeyFromPayment(latest);
-      const plan = planLabel(planKey);
+      const plan = status === 'Inactive' ? '—' : planLabel(planKey);
       const rawCategory = String(latest?.memberCategory || u?.lastMemberCategory || '').trim().toLowerCase();
       const memberType = rawCategory && !rawCategory.includes('non-member') ? 'Member' : 'Non-member';
       const sessions =
         typeof latest?.sessions === 'number' && Number.isFinite(latest.sessions) ? latest.sessions : null;
       const sessionsRemaining =
         typeof u.sessionsRemaining === 'number' && Number.isFinite(u.sessionsRemaining) ? u.sessionsRemaining : null;
+      const effectiveSessionsRemaining = status === 'Inactive' ? null : sessionsRemaining;
 
       return {
         id: u.id,
@@ -985,7 +1007,7 @@ export default function AdminDashboardPage() {
         plan,
         memberType,
         sessions,
-        sessionsRemaining,
+        sessionsRemaining: effectiveSessionsRemaining,
         status,
         pendingPaymentId,
         pendingCount,
