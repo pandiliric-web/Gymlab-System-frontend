@@ -1132,6 +1132,9 @@ export default function AdminDashboardPage() {
         const u = p?.userId ? usersById.get(String(p.userId)) : null;
         const planKey = normalizePlanKeyFromPayment(p);
         const amount = typeof p?.amount === 'number' && Number.isFinite(p.amount) ? p.amount : 0;
+        const rawMethod = String(p?.paymentMethod || '').trim().toLowerCase();
+        const paymentMethod =
+          rawMethod === 'gcash' ? 'GCASH' : rawMethod === 'cash' ? 'Cash' : String(p?.paymentMethod || '').trim() || '—';
         return {
           id: p?.id || Math.random().toString(36).slice(2),
           customerId: u?.customerId || u?.memberId || p?.customerId || '—',
@@ -1139,6 +1142,7 @@ export default function AdminDashboardPage() {
           plan: planLabel(planKey),
           planKey,
           amount,
+          paymentMethod,
           paidAtMs: toMillis(p?.paidAt) || toMillis(p?.updatedAt) || 0,
         };
       });
@@ -1802,6 +1806,7 @@ export default function AdminDashboardPage() {
                           <th scope="col">Customer ID</th>
                           <th scope="col">Name</th>
                           <th scope="col">Plan</th>
+                          <th scope="col">Payment method</th>
                           <th scope="col">Amount</th>
                           <th scope="col">Paid time</th>
                         </tr>
@@ -1809,7 +1814,7 @@ export default function AdminDashboardPage() {
                       <tbody>
                         {loading ? (
                           <tr>
-                            <td colSpan={5} style={{ color: 'var(--text-muted)', padding: '1.1rem' }}>
+                            <td colSpan={6} style={{ color: 'var(--text-muted)', padding: '1.1rem' }}>
                               Loading sales...
                             </td>
                           </tr>
@@ -1819,13 +1824,14 @@ export default function AdminDashboardPage() {
                               <td>{sale.customerId}</td>
                               <td>{sale.name}</td>
                               <td>{sale.plan}</td>
+                              <td>{sale.paymentMethod}</td>
                               <td>{formatPhp(sale.amount)}</td>
                               <td>{sale.paidAtMs ? new Date(sale.paidAtMs).toLocaleTimeString() : '—'}</td>
                             </tr>
                           ))
                         ) : (
                           <tr>
-                            <td colSpan={5} style={{ color: 'var(--text-muted)', padding: '1.1rem' }}>
+                            <td colSpan={6} style={{ color: 'var(--text-muted)', padding: '1.1rem' }}>
                               No paid sales found on this date.
                             </td>
                           </tr>

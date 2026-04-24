@@ -93,7 +93,7 @@ export default function PaymentPage() {
   const [paymentMethod, setPaymentMethod] = useState('Cash');
   const [startDate, setStartDate] = useState(initialStartDate);
   const [endDate, setEndDate] = useState(initialEndDate);
-  const [memberCategory, setMemberCategory] = useState('Member');
+  const [memberCategory, setMemberCategory] = useState('Non-member');
   const [memberCategoryLocked, setMemberCategoryLocked] = useState(false);
   const [memberCategoryDetecting, setMemberCategoryDetecting] = useState(false);
   const [sessions, setSessions] = useState(10);
@@ -106,7 +106,7 @@ export default function PaymentPage() {
   const isWalkInSession = paymentFlow === 'Walk-in Session';
   const isMembershipPayment = paymentFlow === 'Membership Payment';
   const isMonthlyPayment = paymentFlow === 'Monthly Payment';
-  const effectiveMemberCategory = isWalkInSession ? 'Walk-in Client' : isMembershipPayment ? 'Member' : memberCategory;
+  const effectiveMemberCategory = isWalkInSession ? 'Walk-in Client' : memberCategory;
 
   // Pricing tier selection (planKey stored in payment.courseId)
   const computedPlanKey = useMemo(() => {
@@ -271,7 +271,8 @@ export default function PaymentPage() {
     let cancelled = false;
 
     async function detectMemberCategory() {
-      if (!isMonthlyPayment || !user?.uid) {
+      const shouldDetectLockedCategory = isMonthlyPayment || isMembershipPayment;
+      if (!shouldDetectLockedCategory || !user?.uid) {
         setMemberCategoryLocked(false);
         return;
       }
@@ -289,12 +290,16 @@ export default function PaymentPage() {
         const normalized = String(quote?.memberCategory || '').trim().toLowerCase();
         if (normalized === 'member' || normalized === 'non-member') {
           setMemberCategory(normalized === 'non-member' ? 'Non-member' : 'Member');
-          setMemberCategoryLocked(Boolean(quote?.lock));
+          setMemberCategoryLocked(true);
           return;
         }
-        setMemberCategoryLocked(false);
+        setMemberCategory('Non-member');
+        setMemberCategoryLocked(true);
       } catch {
-        if (!cancelled) setMemberCategoryLocked(false);
+        if (!cancelled) {
+          setMemberCategory('Non-member');
+          setMemberCategoryLocked(true);
+        }
       } finally {
         if (!cancelled) setMemberCategoryDetecting(false);
       }
@@ -304,7 +309,7 @@ export default function PaymentPage() {
     return () => {
       cancelled = true;
     };
-  }, [isMonthlyPayment, customerId, user?.uid]);
+  }, [isMonthlyPayment, isMembershipPayment, customerId, user?.uid]);
 
   // Keep amount in sync with admin pricing.
   useEffect(() => {
@@ -319,7 +324,7 @@ export default function PaymentPage() {
     }
 
     const tierKey =
-      isWalkInSession || isMembershipPayment || String(memberCategory || '').trim().toLowerCase() !== 'non-member'
+      isWalkInSession || String(memberCategory || '').trim().toLowerCase() !== 'non-member'
         ? 'member'
         : 'nonMember';
     const price = Number(tierPrices?.[tierKey]?.[computedPlanKey]);
@@ -449,7 +454,7 @@ export default function PaymentPage() {
     setPaymentMethod('Cash');
     setStartDate(initialStartDate);
     setEndDate(initialEndDate);
-    setMemberCategory('Member');
+    setMemberCategory('Non-member');
     setMemberCategoryLocked(false);
     setMemberCategoryDetecting(false);
     setSessions(sessionDefaults.member.monthly);
@@ -538,7 +543,7 @@ export default function PaymentPage() {
                           ? 'Detecting member category from Customer ID...'
                           : memberCategoryLocked
                           ? `Detected ${memberCategory} account from payment history. Category is locked.`
-                          : 'No locked history found. You may choose category manually.'}
+                          : 'Enter Customer ID to auto-detect and lock category.'}
                       </span>
                     ) : null}
                   </label>
