@@ -427,6 +427,19 @@ function parseDateMs(dateValue) {
   return Number.isFinite(ms) ? ms : null;
 }
 
+function isNonMemberCategoryLabel(value) {
+  const raw = String(value || '')
+    .trim()
+    .toLowerCase();
+  if (!raw) return false;
+  return (
+    raw.includes('non-member') ||
+    raw.includes('non member') ||
+    raw.includes('walk-in client') ||
+    raw.includes('walk in client')
+  );
+}
+
 function resolvePaymentEndMs(payment) {
   if (!payment) return null;
   const explicitEnd = parseDateMs(payment?.endDate);
@@ -991,7 +1004,7 @@ export default function AdminDashboardPage() {
 
       const plan = status === 'Inactive' ? '—' : planLabel(planKey);
       const rawCategory = String(latest?.memberCategory || u?.lastMemberCategory || '').trim().toLowerCase();
-      const memberType = rawCategory && !rawCategory.includes('non-member') ? 'Member' : 'Non-member';
+      const memberType = rawCategory && !isNonMemberCategoryLabel(rawCategory) ? 'Member' : 'Non-member';
       const sessions =
         typeof latest?.sessions === 'number' && Number.isFinite(latest.sessions) ? latest.sessions : null;
       const sessionsRemaining =
